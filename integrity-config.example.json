@@ -1,0 +1,4 @@
+{
+  "include": ["README.md", "memory", "personality", "defense"],
+  "exclude": ["defense/quarantine/", "scratch/", "private/", "*.lock", "*.pid", "pet.json"]
+}
