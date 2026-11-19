@@ -16,9 +16,22 @@ sys.path.insert(0, str(HERE))
 
 import check_sender  # noqa: E402
 
+# Live-settings env vars. Tests must never inherit a developer's values,
+# or a baseline/check/intake run can overwrite a real manifest or
+# quarantine folder.
+LIVE_SETTINGS_ENV = (
+    "INTEGRITY_ROOT",
+    "INTEGRITY_CONFIG",
+    "INTEGRITY_MANIFEST",
+    "INTEGRITY_TZ",
+    "QUARANTINE_DIR",
+)
+
 
 def run(script, *args, env=None):
     full = dict(os.environ)
+    for key in LIVE_SETTINGS_ENV:
+        full.pop(key, None)
     full.update(env or {})
     return subprocess.run([sys.executable, str(HERE / script), *args],
                           capture_output=True, text=True, env=full)
@@ -33,8 +46,13 @@ class IntegrityTests(unittest.TestCase):
             (root / "notes" / "a.txt").write_text("one\n")
             (root / "notes" / "live.lock").write_text("x\n")
             cfg = root / "cfg.json"
+            manifest = root / "integrity-manifest.json"
             cfg.write_text(json.dumps({"include": ["README.md", "notes"], "exclude": ["*.lock"]}))
-            env = {"INTEGRITY_ROOT": str(root), "INTEGRITY_CONFIG": str(cfg)}
+            env = {
+                "INTEGRITY_ROOT": str(root),
+                "INTEGRITY_CONFIG": str(cfg),
+                "INTEGRITY_MANIFEST": str(manifest),
+            }
             self.assertEqual(run("integrity.py", "baseline", env=env).returncode, 0)
             self.assertEqual(run("integrity.py", "check", env=env).returncode, 0)
             # Excluded files may change freely.
@@ -44,6 +62,42 @@ class IntegrityTests(unittest.TestCase):
             (root / "notes" / "a.txt").write_text("changed\n")
             r = run("integrity.py", "check", env=env)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+    def test_preset_integrity_manifest_is_left_untouched(self):
+        """A pre-set INTEGRITY_MANIFEST pointing at a real file must be left
+        untouched after a baseline run against a temp fixture."""
+        with tempfile.TemporaryDirectory() as raw:
+            raw = Path(raw)
+            live = raw / "real-manifest.json"
+            sentinel = '{"sentinel": "live-baseline", "files": {"keep": true}}\n'
+            live.write_text(sentinel, encoding="utf-8")
+
+            fixture = raw / "fixture"
+            fixture.mkdir()
+            (fixture / "README.md").write_text("hello\n")
+            cfg = fixture / "cfg.json"
+            cfg.write_text(json.dumps({"include": ["README.md"], "exclude": []}))
+
+            old = os.environ.get("INTEGRITY_MANIFEST")
+            os.environ["INTEGRITY_MANIFEST"] = str(live)
+            try:
+                # Same keys the drift test used to pass, without an explicit
+                # INTEGRITY_MANIFEST override. run() must drop the live var.
+                env = {
+                    "INTEGRITY_ROOT": str(fixture),
+                    "INTEGRITY_CONFIG": str(cfg),
+                }
+                r = run("integrity.py", "baseline", env=env)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(live.read_text(encoding="utf-8"), sentinel)
+                written = fixture / "integrity-manifest.json"
+                self.assertTrue(written.is_file())
+                self.assertNotEqual(written.read_text(encoding="utf-8"), sentinel)
+            finally:
+                if old is None:
+                    os.environ.pop("INTEGRITY_MANIFEST", None)
+                else:
+                    os.environ["INTEGRITY_MANIFEST"] = old
 
 
 class QuarantineTests(unittest.TestCase):
