@@ -9,6 +9,11 @@ Commands:
 
 Inspection is read-only. This tool never executes quarantined content,
 never extracts archives to disk, and never attacks any other system.
+
+When the file is an image (png, jpeg, gif first frame, webp, bmp, tiff),
+intake also runs a local OCR pass (scan_image.py) and feeds any extracted
+text to scan_text.py. Hits are flagged only; the original image is never
+altered. OCR is local only — images are never sent off this computer.
 """
 
 from __future__ import annotations
@@ -449,6 +454,41 @@ def classify_head(data: bytes) -> str:
     return "other"
 
 
+IMAGE_FAMILIES = {"png", "jpeg", "gif", "webp", "bmp", "tiff"}
+
+
+def scan_image_text(path: Path) -> dict:
+    """Flag-only local OCR of text inside an image. Never modifies the file."""
+    try:
+        import scan_image
+    except ImportError as exc:
+        return {
+            "available": False,
+            "hits": [],
+            "text": "",
+            "error": f"scan_image import failed: {exc}",
+        }
+    if not scan_image.ocr_available():
+        missing = []
+        if not scan_image.tesseract_bin():
+            missing.append("tesseract")
+        if not scan_image.pillow_available():
+            missing.append("Pillow")
+        return {
+            "available": False,
+            "hits": [],
+            "text": "",
+            "error": "OCR unavailable (" + ", ".join(missing or ["unknown"]) + " not installed)",
+        }
+    result = scan_image.scan_image(path)
+    return {
+        "available": bool(result.get("ok")),
+        "hits": list(result.get("hits") or []),
+        "text": result.get("text") or "",
+        "error": result.get("error"),
+    }
+
+
 def scan_pdf_javascript(path: Path) -> bool:
     # Read-only peek. Stop after 2 MiB so a huge PDF cannot stall intake.
     budget = min(path.stat().st_size, 2 * 1024 * 1024)
@@ -511,6 +551,16 @@ def inspect(path: Path, original_mode: int | None = None) -> dict:
     if family == "pdf" and scan_pdf_javascript(path):
         flags.append("PDF contains JavaScript")
 
+    image_text = None
+    if family in IMAGE_FAMILIES:
+        image_text = scan_image_text(path)
+        if image_text.get("hits"):
+            labels = ", ".join(dict.fromkeys(hit[1] for hit in image_text["hits"]))
+            excerpt = image_text["hits"][0][2]
+            if len(excerpt) > 120:
+                excerpt = excerpt[:117] + "..."
+            flags.append(f"image text looks instruction-like ({labels}): {excerpt}")
+
     # Deduplicate while preserving order.
     seen = set()
     unique_flags = []
@@ -519,7 +569,7 @@ def inspect(path: Path, original_mode: int | None = None) -> dict:
             seen.add(flag)
             unique_flags.append(flag)
 
-    return {
+    report = {
         "label": label,
         "family": family,
         "extension": last_ext,
@@ -530,6 +580,16 @@ def inspect(path: Path, original_mode: int | None = None) -> dict:
         "executable_bits_on_intake": exec_bits,
         "sniffer": "file(1)" if shutil.which("file") else "builtin-magic",
     }
+    if image_text is not None:
+        hits = image_text.get("hits") or []
+        report["image_text"] = {
+            "available": bool(image_text.get("available")),
+            "hit_count": len(hits),
+            "labels": [hit[1] for hit in hits],
+            "excerpt": (hits[0][2] if hits else "")[:200],
+            "error": image_text.get("error"),
+        }
+    return report
 
 
 def strip_execute_bits(path: Path) -> None:

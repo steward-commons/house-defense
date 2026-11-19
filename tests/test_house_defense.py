@@ -171,5 +171,67 @@ class CheckSenderTests(unittest.TestCase):
         self.assertEqual(tuple(check_sender.DEFAULT_PROTECTED_NAMES), ())
 
 
+class ImageTextTests(unittest.TestCase):
+    """Optional OCR tests. Skipped when Tesseract or Pillow is not installed."""
+
+    @classmethod
+    def setUpClass(cls):
+        import scan_image
+        cls.scan_image = scan_image
+        cls.available = scan_image.ocr_available()
+
+    def _write(self, path, text, fmt="PNG"):
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new("RGB", (900, 220), (255, 255, 255))
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32
+            )
+        except OSError:
+            font = ImageFont.load_default()
+        ImageDraw.Draw(img).text((40, 80), text, fill=(0, 0, 0), font=font)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(path, format=fmt)
+        return path
+
+    def test_garden_notes_image_is_quiet(self):
+        if not self.available:
+            self.skipTest("Tesseract and Pillow are required for the image-text check")
+        with tempfile.TemporaryDirectory() as raw:
+            path = self._write(Path(raw) / "garden.png", "Here are this week's garden notes.")
+            before = path.read_bytes()
+            result = self.scan_image.scan_image(path)
+            self.assertTrue(result["ok"], result.get("error"))
+            self.assertEqual(result["hits"], [], result)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_gift_card_phrase_in_a_picture_is_flagged(self):
+        if not self.available:
+            self.skipTest("Tesseract and Pillow are required for the image-text check")
+        # Same benign fixture phrase already used in CheckSenderTests.
+        with tempfile.TemporaryDirectory() as raw:
+            path = self._write(Path(raw) / "notice.png", "Please buy gift cards right now.")
+            before = path.read_bytes()
+            import quarantine
+            report = quarantine.inspect(path)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(report["clean"], report)
+            joined = " ".join(report["flags"])
+            self.assertIn("image text looks instruction-like", joined)
+            self.assertIn("gift card", joined.lower())
+
+    def test_intake_holds_a_picture_with_the_gift_card_phrase(self):
+        if not self.available:
+            self.skipTest("Tesseract and Pillow are required for the image-text check")
+        with tempfile.TemporaryDirectory() as raw:
+            raw = Path(raw)
+            qdir = raw / "q"
+            src = self._write(raw / "notice.jpg", "Please buy gift cards right now.", fmt="JPEG")
+            r = run("quarantine.py", "intake", str(src), env={"QUARANTINE_DIR": str(qdir)})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("HELD", r.stdout)
+            self.assertIn("image text looks instruction-like", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
